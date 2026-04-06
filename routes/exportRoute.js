@@ -1,378 +1,340 @@
 import { Router } from 'express'
-import puppeteer from 'puppeteer'
+import PDFDocument from 'pdfkit'
 
 const router = Router()
 
-// ── Formatters ─────────────────────────────────────────────────────────────
+// ── Helpers ────────────────────────────────────────────────────────────────
 
-function usd(val) {
-  if (val == null || isNaN(val)) return '$0.00'
-  return val.toLocaleString('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2 })
-}
+const fmtUSD = (val) =>
+  new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(val || 0)
 
-function pct(val) {
-  if (val == null || isNaN(val)) return '0.00%'
-  return (val * 100).toFixed(2) + '%'
-}
-
-function diffColor(val) {
-  if (val > 0) return '#dc2626'
-  if (val < 0) return '#16a34a'
-  return '#16a34a'
-}
-
-function diffStr(val) {
-  if (val == null || isNaN(val)) return '$0.00'
-  const formatted = usd(Math.abs(val))
-  if (val > 0) return '+' + formatted
-  if (val < 0) return '-' + formatted
-  return formatted
-}
-
-function escHtml(str) {
-  return String(str)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-}
-
-function fmtHours(val) {
-  return Number(val).toLocaleString('en-US', { minimumFractionDigits: 1, maximumFractionDigits: 1 })
-}
-
-// ── HTML Builder ───────────────────────────────────────────────────────────
-
-function chartSection(title, borderColor, legendText, imgDataUrl) {
-  const content = imgDataUrl
-    ? `<img src="${imgDataUrl}" style="width:100%; height:auto; display:block; border-radius:4px;" />`
-    : `<p style="color:#64748b;font-style:italic;text-align:center;padding:20px;">Chart not available</p>`
-  const legend = legendText
-    ? `<div style="font-size:10px;color:#64748b;margin-bottom:8px;">${legendText}</div>`
-    : ''
-  return `
-  <div style="background:#ffffff;border:1px solid #e2e8f0;border-left:4px solid ${borderColor};
-    border-radius:6px;padding:16px;margin-bottom:16px;">
-    <div style="font-size:13px;font-weight:bold;text-transform:uppercase;letter-spacing:0.05em;
-      color:#1e3a5f;margin-bottom:12px;">${title}</div>
-    ${legend}
-    ${content}
-  </div>`
-}
-
-function buildHtml(result, formData, chartImages) {
-  const { summary, weeklyData, projectInfo } = result
-  const { materialChart, laborChart, hoursChart } = chartImages || {}
-  const pi = formData.projectInfo
-  const sched = formData.schedule
-  const phases = projectInfo.phases || []
-  const generatedDate = new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })
-
-  const phaseTagsHtml = phases.map(p =>
-    `<span style="display:inline-block;background:#e0e7ff;color:#1e3a5f;border-radius:4px;
-      padding:2px 8px;font-size:9px;margin:2px 4px 2px 0;font-weight:600;">
-      ${escHtml(p.name)}: ${p.startDate} → ${p.endDate}
-    </span>`
-  ).join('')
-
-  const summaryRows = [
-    { label: 'Materials', orig: summary.budgetedMaterial, esc: summary.escalatedMaterial, diff: summary.materialDifference, pctVal: summary.materialEscPercent, accent: '#3b82f6' },
-    { label: 'Labor',     orig: summary.budgetedLabor,    esc: summary.escalatedLabor,    diff: summary.laborDifference,    pctVal: summary.laborEscPercent,    accent: '#16a34a' },
-  ].map(r => `
-    <tr>
-      <td style="padding:8px 10px;border-bottom:1px solid #e2e8f0;font-size:11px;
-        border-left:3px solid ${r.accent};font-weight:600;color:#1a1a2e;">${r.label}</td>
-      <td style="padding:8px 10px;border-bottom:1px solid #e2e8f0;font-size:11px;text-align:right;color:#1a1a2e;">${usd(r.orig)}</td>
-      <td style="padding:8px 10px;border-bottom:1px solid #e2e8f0;font-size:11px;text-align:right;color:#1a1a2e;">${usd(r.esc)}</td>
-      <td style="padding:8px 10px;border-bottom:1px solid #e2e8f0;font-size:11px;text-align:right;color:${diffColor(r.diff)};font-weight:600;">${diffStr(r.diff)}</td>
-      <td style="padding:8px 10px;border-bottom:1px solid #e2e8f0;font-size:11px;text-align:right;color:#64748b;">${pct(r.pctVal)}</td>
-    </tr>
-  `).join('')
-
-  const weeklyRows = weeklyData.map((row, i) => {
-    const bg = i % 2 === 0 ? '#ffffff' : '#f8fafc'
-    return `
-      <tr style="background:${bg};">
-        <td style="padding:5px 8px;font-size:10px;text-align:center;color:#64748b;border-bottom:1px solid #e2e8f0;">${row.week}</td>
-        <td style="padding:5px 8px;font-size:10px;font-weight:600;color:#1a1a2e;border-bottom:1px solid #e2e8f0;white-space:nowrap;">${row.weekLabel}</td>
-        <td style="padding:5px 8px;font-size:10px;text-align:right;color:#1a1a2e;border-bottom:1px solid #e2e8f0;">${usd(row.materialCost)}</td>
-        <td style="padding:5px 8px;font-size:10px;text-align:right;color:#1a1a2e;border-bottom:1px solid #e2e8f0;">${usd(row.laborCost)}</td>
-        <td style="padding:5px 8px;font-size:10px;text-align:right;color:#1a1a2e;border-bottom:1px solid #e2e8f0;">${fmtHours(row.hours)}</td>
-        <td style="padding:5px 8px;font-size:10px;text-align:right;color:#1e3a5f;font-weight:600;border-bottom:1px solid #e2e8f0;">${usd(row.cumulativeMaterial)}</td>
-        <td style="padding:5px 8px;font-size:10px;text-align:right;color:#16a34a;font-weight:600;border-bottom:1px solid #e2e8f0;">${usd(row.cumulativeLabor)}</td>
-      </tr>
-    `
-  }).join('')
-
-  const phaseDetailsHtml = phases.map((p, i) => `
-    <tr>
-      <td style="padding:8px 10px;border-bottom:1px solid #e2e8f0;font-size:11px;font-weight:700;color:#1e3a5f;">
-        Phase ${i + 1} — ${escHtml(p.name)}
-      </td>
-      <td style="padding:8px 10px;border-bottom:1px solid #e2e8f0;font-size:11px;color:#64748b;">${p.startDate} → ${p.endDate}</td>
-      <td style="padding:8px 10px;border-bottom:1px solid #e2e8f0;font-size:11px;text-align:right;color:#1a1a2e;">
-        ${Number(p.estimatedHours).toLocaleString('en-US')} hrs
-      </td>
-    </tr>
-  `).join('')
-
-  return `<!DOCTYPE html>
-<html>
-<head>
-<meta charset="utf-8">
-<style>
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { font-family: Arial, sans-serif; background: #f8fafc; color: #1a1a2e; font-size: 12px; line-height: 1.5; }
-  @page { margin: 15mm 12mm; }
-  .page-break { page-break-before: always; }
-</style>
-</head>
-<body>
-
-  <!-- ── PAGE HEADER ───────────────────────────────────────────────────── -->
-  <div style="background:#1e3a5f;padding:16px 20px;display:flex;justify-content:space-between;
-    align-items:center;border-bottom:3px solid #3b82f6;margin-bottom:0;">
-    <div>
-      <div style="font-size:18px;font-weight:700;color:#ffffff;letter-spacing:0.02em;">
-        ESCALATION CALCULATOR REPORT
-      </div>
-      <div style="font-size:11px;color:#93c5fd;margin-top:3px;">Cost Escalation Analysis</div>
-    </div>
-    <div style="text-align:right;">
-      <div style="font-size:11px;color:#93c5fd;">Generated: ${generatedDate}</div>
-      <div style="font-size:10px;color:#60a5fa;margin-top:2px;">Confidential</div>
-    </div>
-  </div>
-
-  <!-- ── PROJECT INFO CARD ─────────────────────────────────────────────── -->
-  <div style="background:#ffffff;border-bottom:3px solid #3b82f6;padding:16px 20px;margin-bottom:16px;">
-    <table style="width:100%;border-collapse:collapse;margin-bottom:10px;">
-      <tr>
-        <td style="width:25%;padding:4px 8px 4px 0;">
-          <span style="font-size:9px;color:#64748b;text-transform:uppercase;letter-spacing:0.05em;">Estimate #</span><br>
-          <span style="font-size:12px;font-weight:700;color:#1e3a5f;">${escHtml(pi.estimateNumber)}</span>
-        </td>
-        <td style="width:25%;padding:4px 8px;">
-          <span style="font-size:9px;color:#64748b;text-transform:uppercase;letter-spacing:0.05em;">BidTracer #</span><br>
-          <span style="font-size:12px;font-weight:700;color:#1e3a5f;">${escHtml(pi.bidTracerNumber)}</span>
-        </td>
-        <td style="width:25%;padding:4px 8px;">
-          <span style="font-size:9px;color:#64748b;text-transform:uppercase;letter-spacing:0.05em;">Date</span><br>
-          <span style="font-size:12px;font-weight:700;color:#1e3a5f;">${pi.date}</span>
-        </td>
-        <td style="width:25%;padding:4px 0 4px 8px;">
-          <span style="font-size:9px;color:#64748b;text-transform:uppercase;letter-spacing:0.05em;">Bid Date</span><br>
-          <span style="font-size:12px;font-weight:700;color:#1e3a5f;">${pi.bidDate}</span>
-        </td>
-      </tr>
-    </table>
-    <div style="padding-top:10px;border-top:1px solid #e2e8f0;">
-      <span style="font-size:9px;color:#64748b;text-transform:uppercase;letter-spacing:0.05em;">Overall Schedule</span>
-      <span style="font-size:11px;font-weight:600;color:#1a1a2e;margin-left:8px;">${sched.startDate} → ${sched.endDate}</span>
-    </div>
-    <div style="margin-top:8px;">
-      <span style="font-size:9px;color:#64748b;text-transform:uppercase;letter-spacing:0.05em;vertical-align:middle;">Phases</span>
-      <span style="margin-left:8px;">${phaseTagsHtml}</span>
-    </div>
-  </div>
-
-  <!-- ── COST SUMMARY CARD ─────────────────────────────────────────────── -->
-  <div style="background:#ffffff;border:1px solid #e2e8f0;border-left:4px solid #3b82f6;
-    border-radius:6px;padding:16px 20px;margin-bottom:16px;">
-
-    <div style="font-size:13px;font-weight:700;color:#1e3a5f;text-transform:uppercase;
-      letter-spacing:0.05em;margin-bottom:14px;padding-bottom:8px;border-bottom:1px solid #e2e8f0;">
-      COST SUMMARY
-    </div>
-
-    <!-- 4 metric boxes -->
-    <table style="width:100%;border-collapse:separate;border-spacing:8px;margin-bottom:16px;">
-      <tr>
-        ${[
-          { label: 'ORIGINAL BUDGET',  value: usd(summary.totalBudget) },
-          { label: 'ESCALATED TOTAL',  value: usd(summary.totalEscalated) },
-          { label: '$ DIFFERENCE',     value: diffStr(summary.totalDifference), color: diffColor(summary.totalDifference) },
-          { label: '% ESCALATION',     value: pct(summary.totalEscPercent) },
-        ].map(m => `
-          <td style="width:25%;background:#f0f4f8;border:1px solid #e2e8f0;border-radius:6px;
-            padding:10px 12px;vertical-align:top;">
-            <div style="font-size:9px;color:#64748b;text-transform:uppercase;letter-spacing:0.05em;margin-bottom:6px;">
-              ${m.label}
-            </div>
-            <div style="font-size:16px;font-weight:700;color:${m.color || '#1e3a5f'};">
-              ${m.value}
-            </div>
-          </td>
-        `).join('')}
-      </tr>
-    </table>
-
-    <!-- Breakdown table -->
-    <table style="width:100%;border-collapse:collapse;">
-      <thead>
-        <tr style="background:#1e3a5f;">
-          <th style="padding:8px 10px;text-align:left;font-size:11px;font-weight:700;color:#ffffff;text-transform:uppercase;">Category</th>
-          <th style="padding:8px 10px;text-align:right;font-size:11px;font-weight:700;color:#ffffff;text-transform:uppercase;">Original Budget</th>
-          <th style="padding:8px 10px;text-align:right;font-size:11px;font-weight:700;color:#ffffff;text-transform:uppercase;">Escalated Total</th>
-          <th style="padding:8px 10px;text-align:right;font-size:11px;font-weight:700;color:#ffffff;text-transform:uppercase;">Difference</th>
-          <th style="padding:8px 10px;text-align:right;font-size:11px;font-weight:700;color:#ffffff;text-transform:uppercase;">Esc. %</th>
-        </tr>
-      </thead>
-      <tbody>
-        ${summaryRows}
-        <tr style="background:#1e3a5f;">
-          <td style="padding:9px 10px;font-size:11px;font-weight:700;color:#ffffff;border-left:3px solid #3b82f6;">TOTAL</td>
-          <td style="padding:9px 10px;font-size:11px;font-weight:700;color:#ffffff;text-align:right;">${usd(summary.totalBudget)}</td>
-          <td style="padding:9px 10px;font-size:11px;font-weight:700;color:#ffffff;text-align:right;">${usd(summary.totalEscalated)}</td>
-          <td style="padding:9px 10px;font-size:11px;font-weight:700;text-align:right;color:${diffColor(summary.totalDifference)};">
-            ${diffStr(summary.totalDifference)}
-          </td>
-          <td style="padding:9px 10px;font-size:11px;font-weight:700;color:#ffffff;text-align:right;">${pct(summary.totalEscPercent)}</td>
-        </tr>
-      </tbody>
-    </table>
-  </div>
-
-  <!-- ── CHARTS ──────────────────────────────────────────────────────── -->
-  ${chartSection(
-    'CUMULATIVE MATERIAL COST',
-    '#3b82f6',
-    'Blue line = Escalated Cost &nbsp;|&nbsp; Dashed line = Original Budget',
-    materialChart
-  )}
-  ${chartSection(
-    'CUMULATIVE LABOR COST',
-    '#16a34a',
-    'Green line = Escalated Cost &nbsp;|&nbsp; Dashed line = Original Budget',
-    laborChart
-  )}
-  ${chartSection('WORKER HOURS PER WEEK', '#9333ea', null, hoursChart)}
-
-  <!-- ── PHASE DETAILS CARD ────────────────────────────────────────────── -->
-  <div style="background:#ffffff;border:1px solid #e2e8f0;border-left:4px solid #f97316;
-    border-radius:6px;padding:16px 20px;margin-bottom:16px;">
-    <div style="font-size:13px;font-weight:700;color:#1e3a5f;text-transform:uppercase;
-      letter-spacing:0.05em;margin-bottom:12px;padding-bottom:8px;border-bottom:1px solid #e2e8f0;">
-      PHASE DETAILS
-    </div>
-    <table style="width:100%;border-collapse:collapse;">
-      <thead>
-        <tr style="background:#1e3a5f;">
-          <th style="padding:8px 10px;text-align:left;font-size:11px;font-weight:700;color:#ffffff;text-transform:uppercase;">Phase</th>
-          <th style="padding:8px 10px;text-align:left;font-size:11px;font-weight:700;color:#ffffff;text-transform:uppercase;">Schedule</th>
-          <th style="padding:8px 10px;text-align:right;font-size:11px;font-weight:700;color:#ffffff;text-transform:uppercase;">Est. Hours</th>
-        </tr>
-      </thead>
-      <tbody>${phaseDetailsHtml}</tbody>
-    </table>
-  </div>
-
-  <!-- ── WEEKLY BREAKDOWN (new page) ──────────────────────────────────── -->
-  <div class="page-break"></div>
-
-  <div style="background:#ffffff;border:1px solid #e2e8f0;border-left:4px solid #9333ea;
-    border-radius:6px;padding:16px 20px;margin-bottom:16px;">
-    <div style="font-size:13px;font-weight:700;color:#1e3a5f;text-transform:uppercase;
-      letter-spacing:0.05em;margin-bottom:12px;padding-bottom:8px;border-bottom:1px solid #e2e8f0;">
-      WEEKLY BREAKDOWN
-    </div>
-    <table style="width:100%;border-collapse:collapse;">
-      <thead>
-        <tr style="background:#1e3a5f;">
-          <th style="padding:7px 8px;text-align:center;font-size:10px;font-weight:700;color:#ffffff;text-transform:uppercase;">Wk</th>
-          <th style="padding:7px 8px;text-align:left;font-size:10px;font-weight:700;color:#ffffff;text-transform:uppercase;">Week Of</th>
-          <th style="padding:7px 8px;text-align:right;font-size:10px;font-weight:700;color:#ffffff;text-transform:uppercase;">Material Cost</th>
-          <th style="padding:7px 8px;text-align:right;font-size:10px;font-weight:700;color:#ffffff;text-transform:uppercase;">Labor Cost</th>
-          <th style="padding:7px 8px;text-align:right;font-size:10px;font-weight:700;color:#ffffff;text-transform:uppercase;">Hours</th>
-          <th style="padding:7px 8px;text-align:right;font-size:10px;font-weight:700;color:#ffffff;text-transform:uppercase;">Cum. Material</th>
-          <th style="padding:7px 8px;text-align:right;font-size:10px;font-weight:700;color:#ffffff;text-transform:uppercase;">Cum. Labor</th>
-        </tr>
-      </thead>
-      <tbody>${weeklyRows}</tbody>
-    </table>
-  </div>
-
-  <!-- ── FOOTER ───────────────────────────────────────────────────────── -->
-  <div style="margin-top:24px;padding-top:10px;border-top:1px solid #e2e8f0;
-    display:flex;justify-content:space-between;font-size:9px;color:#64748b;">
-    <span>Escalation Calculator — Confidential</span>
-    <span>${new Date().getFullYear()}</span>
-  </div>
-
-</body>
-</html>`
-}
+const fmtPct = (val) => `${((val || 0) * 100).toFixed(2)}%`
 
 // ── Route ──────────────────────────────────────────────────────────────────
 
 router.post('/', async (req, res) => {
-  console.log('PDF export started')
-
-  const { result, formData, chartImages } = req.body
-
-  if (!result || !formData) {
-    return res.status(400).json({ error: 'result and formData are required' })
-  }
-
-  console.log('Payload received — weeklyData rows:', result?.weeklyData?.length)
-  console.log('Chart images received:', Object.keys(chartImages || {}).filter(k => chartImages[k]))
-
-  let browser
   try {
-    const html = buildHtml(result, formData, chartImages)
-    console.log('HTML built, length:', html.length)
+    const { result, formData, chartImages } = req.body
 
-    console.log('Launching puppeteer...')
-    browser = await puppeteer.launch({
-      headless: 'new',
-      args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-gpu',
-        '--no-zygote',
-        '--single-process',
-      ],
+    if (!result || !formData) {
+      return res.status(400).json({ error: 'result and formData are required' })
+    }
+
+    const { summary, weeklyData } = result
+    const pi = formData.projectInfo || {}
+    const sched = formData.schedule || {}
+    const phases = formData.phases || []
+
+    const doc = new PDFDocument({
+      size: 'A4',
+      margin: 40,
+      info: {
+        Title: 'Escalation Calculator Report',
+        Author: 'Escalation Calculator',
+      },
     })
-    console.log('Puppeteer launched')
 
-    const page = await browser.newPage()
-
-    console.log('Setting page content...')
-    await page.setContent(html, { waitUntil: 'domcontentloaded', timeout: 30000 })
-    // Short wait to ensure base64 images are fully decoded before PDF render
-    await new Promise(resolve => setTimeout(resolve, 500))
-    console.log('Content set')
-
-    console.log('Generating PDF...')
-    const pdfResult = await page.pdf({
-      format: 'A4',
-      printBackground: true,
-      margin: { top: '15mm', bottom: '15mm', left: '12mm', right: '12mm' },
-      timeout: 30000,
-      displayHeaderFooter: false,
-    })
-    console.log('PDF generated, type:', typeof pdfResult, 'constructor:', pdfResult?.constructor?.name)
-
-    await browser.close()
-    browser = null
-
-    // Convert Uint8Array → Node.js Buffer (fixes res.send() JSON-serialisation bug)
-    const pdfBuffer = Buffer.from(pdfResult)
-    console.log('PDF buffer size:', pdfBuffer.length)
-
-    const estimateNum = formData?.projectInfo?.estimateNumber || 'report'
     res.setHeader('Content-Type', 'application/pdf')
-    res.setHeader('Content-Disposition', `attachment; filename="escalation-report-${escHtml(estimateNum)}.pdf"`)
-    res.setHeader('Content-Length', pdfBuffer.length)
-    res.end(pdfBuffer)   // res.end() sends raw binary — avoids express res.send() serialisation
-    console.log('PDF sent successfully')
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename="escalation-report-${pi.estimateNumber || 'report'}.pdf"`
+    )
+    doc.pipe(res)
+
+    // ── Colors ─────────────────────────────────────────────────────────────
+    const NAVY        = '#1e3a5f'
+    const BLUE        = '#3b82f6'
+    const WHITE       = '#ffffff'
+    const LIGHT_GRAY  = '#f8fafc'
+    const BORDER_GRAY = '#e2e8f0'
+    const TEXT_PRI    = '#1a1a2e'
+    const TEXT_SEC    = '#64748b'
+    const GREEN       = '#16a34a'
+    const RED         = '#dc2626'
+    const ORANGE      = '#f97316'
+    const PURPLE      = '#9333ea'
+
+    const PW = doc.page.width - 80   // usable width (margins = 40 each side)
+    const ML = 40                     // left margin
+
+    // ── Drawing helpers ────────────────────────────────────────────────────
+
+    const fillRect = (x, y, w, h, color) => doc.rect(x, y, w, h).fill(color)
+
+    const strokeRect = (x, y, w, h, color = BORDER_GRAY) =>
+      doc.rect(x, y, w, h).stroke(color)
+
+    const leftAccent = (y, h, color) => fillRect(ML, y, 4, h, color)
+
+    // Draws a section heading with left accent bar
+    const sectionTitle = (text, yPos, color) => {
+      leftAccent(yPos, 18, color)
+      doc.fillColor(NAVY).fontSize(11).font('Helvetica-Bold')
+         .text(text, ML + 16, yPos + 3)
+      return yPos + 26
+    }
+
+    // Draws a table header row, returns new y
+    const tableHeader = (y, cols, labels, rowH = 16) => {
+      fillRect(ML, y, PW, rowH, NAVY)
+      let cx = ML + 4
+      labels.forEach((h, i) => {
+        doc.fillColor(WHITE).fontSize(7).font('Helvetica-Bold')
+           .text(h, cx, y + 4, { width: cols[i], lineBreak: false })
+        cx += cols[i]
+      })
+      return y + rowH
+    }
+
+    // Ensures enough space remains on page; adds new page if not
+    const ensureSpace = (needed) => {
+      if (doc.y + needed > doc.page.height - 60) {
+        doc.addPage()
+        return 40
+      }
+      return doc.y
+    }
+
+    const fmtDate = (d) => {
+      try { return new Date(d).toLocaleDateString('en-US') } catch { return d || '—' }
+    }
+
+    // ── PAGE 1 ─────────────────────────────────────────────────────────────
+
+    // Header bar
+    fillRect(0, 0, doc.page.width, 60, NAVY)
+    doc.fillColor(WHITE).fontSize(18).font('Helvetica-Bold')
+       .text('ESCALATION CALCULATOR REPORT', ML, 18)
+    doc.fillColor('#93c5fd').fontSize(10).font('Helvetica')
+       .text(
+         `Generated: ${new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })}`,
+         ML, 42
+       )
+
+    let y = 76
+
+    // ── Project Info card ──────────────────────────────────────────────────
+    const piH = 90
+    fillRect(ML, y, PW, piH, WHITE)
+    leftAccent(y, piH, BLUE)
+    strokeRect(ML + 4, y, PW - 4, piH)
+
+    doc.fillColor(NAVY).fontSize(11).font('Helvetica-Bold')
+       .text('PROJECT INFORMATION', ML + 16, y + 10)
+
+    const piRows = [
+      ['Estimate #:', pi.estimateNumber || '—'],
+      ['BidTracer #:', pi.bidTracerNumber || '—'],
+      ['Date:', fmtDate(pi.date)],
+      ['Bid Date:', fmtDate(pi.bidDate)],
+    ]
+    piRows.forEach(([label, value], i) => {
+      const ry = y + 28 + i * 14
+      doc.fillColor(TEXT_SEC).fontSize(9).font('Helvetica').text(label, ML + 16, ry)
+      doc.fillColor(TEXT_PRI).fontSize(9).font('Helvetica-Bold').text(value, ML + 120, ry)
+    })
+
+    doc.fillColor(TEXT_SEC).fontSize(9).font('Helvetica').text('Overall Schedule:', ML + 280, y + 28)
+    doc.fillColor(TEXT_PRI).fontSize(9).font('Helvetica-Bold')
+       .text(`${fmtDate(sched.startDate)} → ${fmtDate(sched.endDate)}`, ML + 280, y + 42)
+
+    doc.fillColor(TEXT_SEC).fontSize(9).font('Helvetica').text('Phases:', ML + 280, y + 56)
+    doc.fillColor(TEXT_PRI).fontSize(9).font('Helvetica-Bold')
+       .text(phases.map(p => p.name).join(', ') || '—', ML + 280, y + 70, { width: PW - 260 })
+
+    y += piH + 12
+
+    // ── Cost Summary card ──────────────────────────────────────────────────
+    const summH = 150
+    fillRect(ML, y, PW, summH, WHITE)
+    leftAccent(y, summH, BLUE)
+    strokeRect(ML + 4, y, PW - 4, summH)
+
+    doc.fillColor(NAVY).fontSize(11).font('Helvetica-Bold')
+       .text('COST SUMMARY', ML + 16, y + 10)
+
+    // 4 metric boxes
+    const boxW = Math.floor((PW - 24) / 4)
+    const metricBoxes = [
+      { label: 'ORIGINAL BUDGET',  value: fmtUSD(summary?.totalBudget),      color: NAVY },
+      { label: 'ESCALATED TOTAL',  value: fmtUSD(summary?.totalEscalated),    color: NAVY },
+      { label: '$ DIFFERENCE',     value: fmtUSD(summary?.totalDifference),   color: summary?.totalDifference > 0 ? RED : GREEN },
+      { label: '% ESCALATION',     value: fmtPct(summary?.totalEscPercent),   color: NAVY },
+    ]
+    metricBoxes.forEach((box, i) => {
+      const bx = ML + 16 + i * (boxW + 4)
+      const by = y + 28
+      fillRect(bx, by, boxW, 44, LIGHT_GRAY)
+      strokeRect(bx, by, boxW, 44)
+      doc.fillColor(TEXT_SEC).fontSize(7).font('Helvetica')
+         .text(box.label, bx + 4, by + 6, { width: boxW - 8, align: 'center', lineBreak: false })
+      doc.fillColor(box.color).fontSize(11).font('Helvetica-Bold')
+         .text(box.value, bx + 4, by + 20, { width: boxW - 8, align: 'center', lineBreak: false })
+    })
+
+    // Breakdown table
+    const tblCols = [100, 95, 95, 95, 75]
+    const tblHdrs = ['Category', 'Original Budget', 'Escalated Total', 'Difference', 'Esc. %']
+    let ty = y + 82
+    ty = tableHeader(ty, tblCols, tblHdrs)
+
+    const tblData = [
+      {
+        label: 'Materials', accent: BLUE, bg: WHITE,
+        vals: [
+          fmtUSD(summary?.budgetedMaterial),
+          fmtUSD(summary?.escalatedMaterial),
+          fmtUSD(summary?.materialDifference),
+          fmtPct(summary?.materialEscPercent),
+        ],
+        diffIdx: 2, diffVal: summary?.materialDifference,
+      },
+      {
+        label: 'Labor', accent: GREEN, bg: LIGHT_GRAY,
+        vals: [
+          fmtUSD(summary?.budgetedLabor),
+          fmtUSD(summary?.escalatedLabor),
+          fmtUSD(summary?.laborDifference),
+          fmtPct(summary?.laborEscPercent),
+        ],
+        diffIdx: 2, diffVal: summary?.laborDifference,
+      },
+    ]
+    tblData.forEach((row) => {
+      fillRect(ML, ty, PW, 16, row.bg)
+      strokeRect(ML, ty, PW, 16)
+      fillRect(ML, ty, 4, 16, row.accent)
+      let cx = ML + 6
+      ;[row.label, ...row.vals].forEach((v, i) => {
+        const color = (i - 1 === row.diffIdx && row.diffVal > 0) ? RED : TEXT_PRI
+        doc.fillColor(color).fontSize(8).font('Helvetica')
+           .text(v, cx, ty + 4, { width: tblCols[i] - 4, lineBreak: false })
+        cx += tblCols[i]
+      })
+      ty += 16
+    })
+
+    y += summH + 12
+
+    // ── Charts ─────────────────────────────────────────────────────────────
+    const chartDefs = [
+      { key: 'materialChart', title: 'CUMULATIVE MATERIAL COST', color: BLUE,   sub: 'Blue line = Escalated Cost  |  Dashed = Original Budget' },
+      { key: 'laborChart',    title: 'CUMULATIVE LABOR COST',    color: GREEN,  sub: 'Green line = Escalated Cost  |  Dashed = Original Budget' },
+      { key: 'hoursChart',    title: 'WORKER HOURS PER WEEK',    color: PURPLE, sub: 'Hours distributed across project timeline' },
+    ]
+
+    if (chartImages && Object.values(chartImages).some(Boolean)) {
+      doc.addPage()
+      y = 40
+
+      for (const chart of chartDefs) {
+        const imgDataUrl = chartImages[chart.key]
+        y = ensureSpace(240)
+
+        leftAccent(y, 220, chart.color)
+        doc.fillColor(NAVY).fontSize(11).font('Helvetica-Bold')
+           .text(chart.title, ML + 16, y)
+        doc.fillColor(TEXT_SEC).fontSize(9).font('Helvetica')
+           .text(chart.sub, ML + 16, y + 16)
+
+        if (imgDataUrl) {
+          try {
+            const base64 = imgDataUrl.replace(/^data:image\/png;base64,/, '')
+            doc.image(Buffer.from(base64, 'base64'), ML + 16, y + 32, {
+              width: PW - 20,
+              height: 180,
+            })
+          } catch {
+            doc.fillColor(TEXT_SEC).fontSize(9).font('Helvetica')
+               .text('Chart not available', ML + 16, y + 110)
+          }
+        } else {
+          doc.fillColor(TEXT_SEC).fontSize(9).font('Helvetica')
+             .text('Chart not available', ML + 16, y + 110)
+        }
+        y += 240
+      }
+    }
+
+    // ── Weekly Breakdown table ─────────────────────────────────────────────
+    doc.addPage()
+    y = 40
+
+    y = sectionTitle('WEEKLY BREAKDOWN', y, PURPLE)
+
+    const wCols = [36, 62, 82, 82, 52, 88, 88]
+    const wHdrs = ['Wk', 'Week Of', 'Mat. Cost', 'Labor Cost', 'Hours', 'Cum. Material', 'Cum. Labor']
+
+    const drawWeeklyHeader = (yPos) => tableHeader(yPos, wCols, wHdrs, 16)
+
+    y = drawWeeklyHeader(y)
+
+    ;(weeklyData || []).forEach((row, idx) => {
+      if (y > doc.page.height - 60) {
+        doc.addPage()
+        y = 40
+        y = drawWeeklyHeader(y)
+      }
+      const bg = idx % 2 === 0 ? WHITE : LIGHT_GRAY
+      fillRect(ML, y, PW, 13, bg)
+      strokeRect(ML, y, PW, 13)
+      const vals = [
+        String(row.week || idx + 1),
+        row.weekLabel || '—',
+        fmtUSD(row.materialCost),
+        fmtUSD(row.laborCost),
+        Math.round(row.hours || 0).toLocaleString(),
+        fmtUSD(row.cumulativeMaterial),
+        fmtUSD(row.cumulativeLabor),
+      ]
+      let cx = ML + 4
+      vals.forEach((v, i) => {
+        doc.fillColor(TEXT_PRI).fontSize(7).font('Helvetica')
+           .text(v, cx, y + 3, { width: wCols[i] - 2, lineBreak: false })
+        cx += wCols[i]
+      })
+      y += 13
+    })
+
+    // ── Phase Details ──────────────────────────────────────────────────────
+    y = ensureSpace(60)
+    if (y === 40) {
+      // new page was added
+    } else {
+      y += 16
+    }
+
+    y = sectionTitle('PHASE DETAILS', y, ORANGE)
+
+    ;(phases || []).forEach((phase, i) => {
+      y = ensureSpace(54)
+      fillRect(ML, y, PW, 50, WHITE)
+      strokeRect(ML, y, PW, 50)
+      leftAccent(y, 50, ORANGE)
+      doc.fillColor(NAVY).fontSize(10).font('Helvetica-Bold')
+         .text(`Phase ${i + 1}: ${phase.name}`, ML + 16, y + 8)
+      doc.fillColor(TEXT_SEC).fontSize(8).font('Helvetica')
+         .text(
+           `${fmtDate(phase.startDate)} → ${fmtDate(phase.endDate)}   |   ` +
+           `Hours: ${Number(phase.estimatedHours || 0).toLocaleString()}`,
+           ML + 16, y + 26, { width: PW - 24 }
+         )
+      y += 58
+    })
+
+    // ── Footer ─────────────────────────────────────────────────────────────
+    doc.fillColor(TEXT_SEC).fontSize(8).font('Helvetica')
+       .text('Escalation Calculator — Confidential', ML, doc.page.height - 30, { align: 'left' })
+       .text(String(new Date().getFullYear()), ML, doc.page.height - 30, { align: 'right', width: PW })
+
+    doc.end()
+    console.log('PDF generated and sent via PDFKit')
 
   } catch (err) {
-    if (browser) await browser.close().catch(() => {})
     console.error('PDF generation error:', err.message)
-    console.error(err.stack)
-    res.status(500).json({ error: 'PDF generation failed', detail: err.message })
+    if (!res.headersSent) {
+      res.status(500).json({ error: 'PDF generation failed', detail: err.message })
+    }
   }
 })
 
