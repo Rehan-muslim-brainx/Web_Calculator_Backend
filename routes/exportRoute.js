@@ -86,13 +86,13 @@ router.post('/', async (req, res) => {
       return y + rowH
     }
 
-    // Ensures enough space remains on page; adds new page if not
-    const ensureSpace = (needed) => {
-      if (doc.y + needed > doc.page.height - 60) {
+    // Returns updated y — adds a new page if the required height won't fit
+    const checkPageBreak = (currentY, needed) => {
+      if (currentY + needed > doc.page.height - 60) {
         doc.addPage()
         return 40
       }
-      return doc.y
+      return currentY
     }
 
     const fmtDate = (d) => {
@@ -217,6 +217,12 @@ router.post('/', async (req, res) => {
     y += summH + 12
 
     // ── Charts ─────────────────────────────────────────────────────────────
+    const CHART_IMG_H  = 180  // rendered image height
+    const CHART_TITLE_H = 18  // title line
+    const CHART_SUB_H   = 16  // subtitle line
+    const CHART_PAD     = 24  // bottom padding between charts
+    const CHART_TOTAL   = CHART_TITLE_H + CHART_SUB_H + CHART_IMG_H + CHART_PAD  // 238
+
     const chartDefs = [
       { key: 'materialChart', title: 'CUMULATIVE MATERIAL COST', color: BLUE,   sub: 'Blue line = Escalated Cost  |  Dashed = Original Budget' },
       { key: 'laborChart',    title: 'CUMULATIVE LABOR COST',    color: GREEN,  sub: 'Green line = Escalated Cost  |  Dashed = Original Budget' },
@@ -224,41 +230,44 @@ router.post('/', async (req, res) => {
     ]
 
     if (chartImages && Object.values(chartImages).some(Boolean)) {
-      doc.addPage()
-      y = 40
-
       for (const chart of chartDefs) {
         const imgDataUrl = chartImages[chart.key]
-        y = ensureSpace(240)
 
-        leftAccent(y, 220, chart.color)
+        // Only draw sections that have an image
+        if (!imgDataUrl) continue
+
+        y = checkPageBreak(y, CHART_TOTAL)
+
+        leftAccent(y, CHART_TOTAL - CHART_PAD, chart.color)
+
+        // Title
         doc.fillColor(NAVY).fontSize(11).font('Helvetica-Bold')
            .text(chart.title, ML + 16, y)
-        doc.fillColor(TEXT_SEC).fontSize(9).font('Helvetica')
-           .text(chart.sub, ML + 16, y + 16)
+        y += CHART_TITLE_H
 
-        if (imgDataUrl) {
-          try {
-            const base64 = imgDataUrl.replace(/^data:image\/png;base64,/, '')
-            doc.image(Buffer.from(base64, 'base64'), ML + 16, y + 32, {
-              width: PW - 20,
-              height: 180,
-            })
-          } catch {
-            doc.fillColor(TEXT_SEC).fontSize(9).font('Helvetica')
-               .text('Chart not available', ML + 16, y + 110)
-          }
-        } else {
+        // Subtitle
+        doc.fillColor(TEXT_SEC).fontSize(9).font('Helvetica')
+           .text(chart.sub, ML + 16, y)
+        y += CHART_SUB_H
+
+        // Image
+        try {
+          const base64 = imgDataUrl.replace(/^data:image\/png;base64,/, '')
+          doc.image(Buffer.from(base64, 'base64'), ML + 16, y, {
+            width: PW - 20,
+            height: CHART_IMG_H,
+          })
+        } catch {
           doc.fillColor(TEXT_SEC).fontSize(9).font('Helvetica')
-             .text('Chart not available', ML + 16, y + 110)
+             .text('Chart not available', ML + 16, y + 80, { align: 'center', width: PW - 20 })
         }
-        y += 240
+        y += CHART_IMG_H + CHART_PAD
       }
     }
 
     // ── Weekly Breakdown table ─────────────────────────────────────────────
-    doc.addPage()
-    y = 40
+    y = checkPageBreak(y, 200)  // need at least a header + a few rows
+    y += 16
 
     y = sectionTitle('WEEKLY BREAKDOWN', y, PURPLE)
 
@@ -297,17 +306,12 @@ router.post('/', async (req, res) => {
     })
 
     // ── Phase Details ──────────────────────────────────────────────────────
-    y = ensureSpace(60)
-    if (y === 40) {
-      // new page was added
-    } else {
-      y += 16
-    }
+    y = checkPageBreak(y + 16, 80)
 
     y = sectionTitle('PHASE DETAILS', y, ORANGE)
 
     ;(phases || []).forEach((phase, i) => {
-      y = ensureSpace(54)
+      y = checkPageBreak(y, 58)
       fillRect(ML, y, PW, 50, WHITE)
       strokeRect(ML, y, PW, 50)
       leftAccent(y, 50, ORANGE)
