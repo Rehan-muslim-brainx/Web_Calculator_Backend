@@ -80,13 +80,24 @@ function buildWeeklyPct(curveWeeks, phaseWeekCount) {
   return weeklyPct
 }
 
-// STEP 8 — escalation factor (whole years only, Excel logic)
+// STEP 8 — escalation factor (whole calendar years only, Excel logic)
 function escalationFactor(currentDay, anniversaryDateStr, escalationPercent) {
-  const anniversaryDate = new Date(anniversaryDateStr)
-  anniversaryDate.setHours(0, 0, 0, 0)
-  const msPerDay = 1000 * 60 * 60 * 24
-  const daysSinceAnniversary = Math.floor((currentDay - anniversaryDate) / msPerDay)
-  const fullYearsElapsed = Math.max(0, Math.floor(daysSinceAnniversary / 365))
+  const anniversary = new Date(anniversaryDateStr)
+  const current = new Date(currentDay)
+
+  // Count how many times the anniversary month/day has passed up to current day
+  let years = current.getFullYear() - anniversary.getFullYear()
+
+  const anniversaryThisYear = new Date(
+    current.getFullYear(),
+    anniversary.getMonth(),
+    anniversary.getDate()
+  )
+  if (current < anniversaryThisYear) {
+    years -= 1
+  }
+
+  const fullYearsElapsed = Math.max(0, years)
   return Math.pow(1 + escalationPercent / 100, fullYearsElapsed)
 }
 
