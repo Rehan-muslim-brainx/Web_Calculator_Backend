@@ -80,26 +80,6 @@ function buildWeeklyPct(curveWeeks, phaseWeekCount) {
   return weeklyPct
 }
 
-// STEP 8 — escalation factor (whole calendar years only, Excel logic)
-function escalationFactor(currentDay, anniversaryDateStr, escalationPercent) {
-  const anniversary = new Date(anniversaryDateStr)
-  const current = new Date(currentDay)
-
-  // Count how many times the anniversary month/day has passed up to current day
-  let years = current.getFullYear() - anniversary.getFullYear()
-
-  const anniversaryThisYear = new Date(
-    current.getFullYear(),
-    anniversary.getMonth(),
-    anniversary.getDate()
-  )
-  if (current < anniversaryThisYear) {
-    years -= 1
-  }
-
-  const fullYearsElapsed = Math.max(0, years)
-  return Math.pow(1 + escalationPercent / 100, fullYearsElapsed)
-}
 
 // Format a date as "Mon D" e.g. "Jul 1"
 function formatWeekLabel(dateStr) {
@@ -194,6 +174,30 @@ router.post('/', async (req, res) => {
 
     // ── STEPS 4–9: Per-phase daily calculations ───────────────────────────────
 
+    const getFullYearsElapsed = (anniversaryDateStr, currentDateStr) => {
+      const anniversary = new Date(anniversaryDateStr)
+      const current = new Date(currentDateStr)
+
+      // If current date is before anniversary date, no escalation
+      if (current < anniversary) return 0
+
+      // Count full calendar years passed
+      let years = current.getFullYear() - anniversary.getFullYear()
+
+      // Check if anniversary month/day has occurred yet in current year
+      const anniversaryThisYear = new Date(
+        current.getFullYear(),
+        anniversary.getMonth(),
+        anniversary.getDate()
+      )
+
+      if (current < anniversaryThisYear) {
+        years -= 1
+      }
+
+      return Math.max(0, years)
+    }
+
     // Pre-pass: compute each phase's subset sum so we can distribute the total
     // budget proportionally across phases (fixes double-counting bug).
     const phaseData = []
@@ -224,7 +228,8 @@ router.post('/', async (req, res) => {
       const weeklyPct = buildWeeklyPct(curveWeeks, phaseWeekCount)
 
       // Steps 7–9 — per workday
-      for (const { date, phaseWeekIndex } of dayMeta) {
+      for (let dayIndex = 0; dayIndex < dayMeta.length; dayIndex++) {
+        const { date, phaseWeekIndex } = dayMeta[dayIndex]
         const daysInThisWeek = daysInWeek[phaseWeekIndex]
         const productionPct = weeklyPct[phaseWeekIndex] / daysInThisWeek
 
@@ -232,9 +237,26 @@ router.post('/', async (req, res) => {
         const rawDailyHours = phase.estimatedHours * productionPct
         const dailyHours = Math.max(8, rawDailyHours)
 
-        // Step 8
-        const matEscFactor = escalationFactor(date, materials.anniversaryDate, materials.escalationPercent)
-        const labEscFactor = escalationFactor(date, labor.anniversaryDate, labor.escalationPercent)
+        // Step 8 — Material escalation factor
+        const currentDayStr = date.toISOString().split('T')[0]
+        const materialYears = getFullYearsElapsed(materials.anniversaryDate, currentDayStr)
+        const matEscFactor = Math.pow(1 + materials.escalationPercent / 100, materialYears)
+
+        // Labor escalation factor
+        const laborYears = getFullYearsElapsed(labor.anniversaryDate, currentDayStr)
+        const labEscFactor = Math.pow(1 + labor.escalationPercent / 100, laborYears)
+
+        // Log first day of each phase to verify escalation years
+        if (dayIndex === 0) {
+          console.log(`Phase: ${phase.name}`)
+          console.log(`First workday: ${currentDayStr}`)
+          console.log(`Material anniversary: ${materials.anniversaryDate}`)
+          console.log(`Material years elapsed: ${materialYears}`)
+          console.log(`Material esc factor: ${matEscFactor}`)
+          console.log(`Labor anniversary: ${labor.anniversaryDate}`)
+          console.log(`Labor years elapsed: ${laborYears}`)
+          console.log(`Labor esc factor: ${labEscFactor}`)
+        }
 
         // Step 9 — use phase-proportional budget, not total budget
         const dailyMaterialCost = phaseMaterialBudget * matEscFactor * productionPct
