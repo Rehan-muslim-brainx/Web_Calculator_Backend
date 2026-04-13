@@ -182,20 +182,32 @@ router.post('/', async (req, res) => {
     }
 
     // ── STEPS 4–9: Per-phase daily calculations ───────────────────────────────
-    // Accumulate into a map keyed by ISO Monday date string
-    const weekAccumulator = {} // { [mondayISO]: { materialCost, laborCost, hours } }
+
+    // Pre-pass: compute each phase's subset sum so we can distribute the total
+    // budget proportionally across phases (fixes double-counting bug).
+    const phaseData = []
+    let totalProjectWeight = 0
 
     for (const phase of phases) {
       const curveWeeks = curveMap[phase.curveId]
-
-      // Step 4 — workdays
       const workdays = getWorkdays(phase.startDate, phase.endDate)
       if (workdays.length === 0) {
         return res.status(400).json({ error: `Phase '${phase.name}' has no workdays in its date range` })
       }
-
-      // Step 5 — phase week grouping
       const { dayMeta, daysInWeek, phaseWeekCount } = buildPhaseWeeks(workdays)
+      const subsetSum = curveWeeks.slice(0, phaseWeekCount).reduce((a, b) => a + b, 0)
+      totalProjectWeight += subsetSum
+      phaseData.push({ phase, curveWeeks, dayMeta, daysInWeek, phaseWeekCount, subsetSum })
+    }
+
+    // Accumulate into a map keyed by ISO Monday date string
+    const weekAccumulator = {} // { [mondayISO]: { materialCost, laborCost, hours } }
+
+    for (const { phase, curveWeeks, dayMeta, daysInWeek, phaseWeekCount, subsetSum } of phaseData) {
+
+      // Each phase gets its proportional share of the total budget
+      const phaseMaterialBudget = materials.budget * (subsetSum / totalProjectWeight)
+      const phaseLaborBudget    = labor.budget    * (subsetSum / totalProjectWeight)
 
       // Step 6 — renormalize curve
       const weeklyPct = buildWeeklyPct(curveWeeks, phaseWeekCount)
@@ -213,9 +225,9 @@ router.post('/', async (req, res) => {
         const matEscFactor = escalationFactor(date, materials.anniversaryDate, materials.escalationPercent)
         const labEscFactor = escalationFactor(date, labor.anniversaryDate, labor.escalationPercent)
 
-        // Step 9
-        const dailyMaterialCost = materials.budget * matEscFactor * productionPct
-        const dailyLaborCost = labor.budget * labEscFactor * productionPct
+        // Step 9 — use phase-proportional budget, not total budget
+        const dailyMaterialCost = phaseMaterialBudget * matEscFactor * productionPct
+        const dailyLaborCost    = phaseLaborBudget    * labEscFactor * productionPct
 
         // Step 10 — accumulate into calendar week bucket
         const mondayKey = isoMonday(date)
@@ -223,8 +235,8 @@ router.post('/', async (req, res) => {
           weekAccumulator[mondayKey] = { materialCost: 0, laborCost: 0, hours: 0 }
         }
         weekAccumulator[mondayKey].materialCost += dailyMaterialCost
-        weekAccumulator[mondayKey].laborCost += dailyLaborCost
-        weekAccumulator[mondayKey].hours += dailyHours
+        weekAccumulator[mondayKey].laborCost    += dailyLaborCost
+        weekAccumulator[mondayKey].hours        += dailyHours
       }
     }
 
