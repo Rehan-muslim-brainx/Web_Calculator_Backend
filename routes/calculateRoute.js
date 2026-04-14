@@ -213,6 +213,17 @@ router.post('/', async (req, res) => {
       return Math.max(0, years)
     }
 
+    const getLaborYearsElapsed = (anniversaryDateStr, currentDateStr) => {
+      const ann = new Date(anniversaryDateStr + 'T00:00:00')
+      const cur = new Date(currentDateStr + 'T00:00:00')
+
+      if (cur < ann) return 0
+
+      const diffMs = cur.getTime() - ann.getTime()
+      const diffDays = diffMs / (1000 * 60 * 60 * 24)
+      return Math.floor(diffDays / 365) + 1
+    }
+
     console.log('Material anniversary parsed:', parseDate(materials.anniversaryDate))
     console.log('Labor anniversary parsed:', parseDate(labor.anniversaryDate))
 
@@ -230,6 +241,14 @@ router.post('/', async (req, res) => {
       const { dayMeta, daysInWeek, phaseWeekCount } = buildPhaseWeeks(workdays)
       const subsetSum = curveWeeks.slice(0, phaseWeekCount).reduce((a, b) => a + b, 0)
       totalProjectWeight += subsetSum
+      console.log('Curve for phase:', phase.name)
+      console.log('Weeks subset used:', curveWeeks.slice(0, phaseWeekCount))
+      console.log('SubsetSum:', subsetSum)
+      console.log('First 3 WeeklyPct values:', [
+        curveWeeks[0] / subsetSum,
+        curveWeeks[1] / subsetSum,
+        curveWeeks[2] / subsetSum
+      ])
       phaseData.push({ phase, curveWeeks, dayMeta, daysInWeek, phaseWeekCount, subsetSum })
     }
 
@@ -261,17 +280,17 @@ router.post('/', async (req, res) => {
         const matEscFactor = Math.pow(1 + materials.escalationPercent / 100, materialYears)
 
         // Labor escalation factor
-        const laborYears = getFullYearsElapsed(labor.anniversaryDate, currentDayStr)
+        const laborYears = getLaborYearsElapsed(labor.anniversaryDate, currentDayStr)
         const labEscFactor = Math.pow(1 + labor.escalationPercent / 100, laborYears)
 
         // Log first day of each phase to verify escalation years
         if (dayIndex === 0) {
-          console.log(`--- Phase: ${phase.name} ---`)
-          console.log(`First day: ${currentDayStr}`)
-          console.log(`Labor anniversary raw: ${labor.anniversaryDate}`)
-          console.log(`Labor anniversary parsed: ${parseDate(labor.anniversaryDate)}`)
-          console.log(`Labor years elapsed: ${laborYears}`)
-          console.log(`Labor esc factor: ${labEscFactor}`)
+          console.log('Phase:', phase.name)
+          console.log('Labor ann:', labor.anniversaryDate)
+          console.log('Labor years:', laborYears)
+          console.log('Labor escFactor:', labEscFactor)
+          console.log('Material years:', materialYears)
+          console.log('Material escFactor:', matEscFactor)
         }
 
         // Step 9 — use phase-proportional budget, not total budget
@@ -310,6 +329,8 @@ router.post('/', async (req, res) => {
         cumulativeLabor
       }
     })
+
+    console.log('weeklyData sample:', weeklyData.slice(0, 5))
 
     // ── STEP 11: Summary ──────────────────────────────────────────────────────
     const escalatedMaterial = weeklyData.reduce((sum, w) => sum + w.materialCost, 0)
