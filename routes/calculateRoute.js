@@ -5,9 +5,27 @@ const router = Router()
 
 // --- Helpers ---
 
+function parseDate(dateStr) {
+  if (!dateStr) return null
+
+  // If format is YYYY-MM-DD (from HTML date input) use directly
+  if (/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
+    return new Date(dateStr + 'T00:00:00')
+  }
+
+  // If format is DD/MM/YYYY convert to YYYY-MM-DD first
+  if (/^\d{2}\/\d{2}\/\d{4}$/.test(dateStr)) {
+    const [day, month, year] = dateStr.split('/')
+    return new Date(`${year}-${month}-${day}T00:00:00`)
+  }
+
+  // If format is MM/DD/YYYY (fallback)
+  return new Date(dateStr + 'T00:00:00')
+}
+
 function isValidDate(str) {
-  const d = new Date(str)
-  return str && !isNaN(d.getTime())
+  const d = parseDate(str)
+  return !!d && !isNaN(d.getTime())
 }
 
 function toMonday(date) {
@@ -26,8 +44,8 @@ function isoMonday(date) {
 // STEP 4 — build workday list for a phase
 function getWorkdays(startDate, endDate) {
   const workdays = []
-  const current = new Date(startDate)
-  const end = new Date(endDate)
+  const current = parseDate(startDate)
+  const end = parseDate(endDate)
   current.setHours(0, 0, 0, 0)
   end.setHours(0, 0, 0, 0)
   while (current < end) {
@@ -131,7 +149,7 @@ router.post('/', async (req, res) => {
       if (!isValidDate(p.startDate) || !isValidDate(p.endDate)) {
         return res.status(400).json({ error: `${label} must have valid startDate and endDate` })
       }
-      if (new Date(p.startDate) >= new Date(p.endDate)) {
+      if (parseDate(p.startDate) >= parseDate(p.endDate)) {
         return res.status(400).json({ error: `${label}.startDate must be before endDate` })
       }
       if (typeof p.estimatedHours !== 'number' || p.estimatedHours <= 0) {
@@ -162,8 +180,8 @@ router.post('/', async (req, res) => {
       for (let j = i + 1; j < phases.length; j++) {
         const a = phases[i]
         const b = phases[j]
-        const overlap = new Date(a.startDate) < new Date(b.endDate) &&
-                        new Date(b.startDate) < new Date(a.endDate)
+        const overlap = parseDate(a.startDate) < parseDate(b.endDate) &&
+                        parseDate(b.startDate) < parseDate(a.endDate)
         if (overlap) {
           return res.status(400).json({
             error: `Phase '${a.name}' and '${b.name}' have overlapping dates`
@@ -174,29 +192,29 @@ router.post('/', async (req, res) => {
 
     // ── STEPS 4–9: Per-phase daily calculations ───────────────────────────────
 
-    const getFullYearsElapsed = (anniversaryDateStr, currentDateStr) => {
-      const anniversary = new Date(anniversaryDateStr)
-      const current = new Date(currentDateStr)
+    const getFullYearsElapsed = (anniversaryDate, currentDate) => {
+      const ann = parseDate(anniversaryDate)
+      const cur = parseDate(currentDate)
 
-      // If current date is before anniversary date, no escalation
-      if (current < anniversary) return 0
+      if (!ann || !cur || cur < ann) return 0
 
-      // Count full calendar years passed
-      let years = current.getFullYear() - anniversary.getFullYear()
+      let years = cur.getFullYear() - ann.getFullYear()
 
-      // Check if anniversary month/day has occurred yet in current year
       const anniversaryThisYear = new Date(
-        current.getFullYear(),
-        anniversary.getMonth(),
-        anniversary.getDate()
+        cur.getFullYear(),
+        ann.getMonth(),
+        ann.getDate()
       )
 
-      if (current < anniversaryThisYear) {
+      if (cur < anniversaryThisYear) {
         years -= 1
       }
 
       return Math.max(0, years)
     }
+
+    console.log('Material anniversary parsed:', parseDate(materials.anniversaryDate))
+    console.log('Labor anniversary parsed:', parseDate(labor.anniversaryDate))
 
     // Pre-pass: compute each phase's subset sum so we can distribute the total
     // budget proportionally across phases (fixes double-counting bug).
@@ -248,12 +266,10 @@ router.post('/', async (req, res) => {
 
         // Log first day of each phase to verify escalation years
         if (dayIndex === 0) {
-          console.log(`Phase: ${phase.name}`)
-          console.log(`First workday: ${currentDayStr}`)
-          console.log(`Material anniversary: ${materials.anniversaryDate}`)
-          console.log(`Material years elapsed: ${materialYears}`)
-          console.log(`Material esc factor: ${matEscFactor}`)
-          console.log(`Labor anniversary: ${labor.anniversaryDate}`)
+          console.log(`--- Phase: ${phase.name} ---`)
+          console.log(`First day: ${currentDayStr}`)
+          console.log(`Labor anniversary raw: ${labor.anniversaryDate}`)
+          console.log(`Labor anniversary parsed: ${parseDate(labor.anniversaryDate)}`)
           console.log(`Labor years elapsed: ${laborYears}`)
           console.log(`Labor esc factor: ${labEscFactor}`)
         }
