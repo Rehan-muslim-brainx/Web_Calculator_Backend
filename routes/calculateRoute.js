@@ -165,14 +165,24 @@ router.post('/', async (req, res) => {
     for (const phase of phases) {
       const { data: curve, error } = await supabase
         .from('curves')
-        .select('weeks')
+        .select('id, name, weeks')
         .eq('id', phase.curveId)
         .single()
+
+      console.log('=== PHASE CURVE DEBUG ===')
+      console.log('Phase name:', phase.name)
+      console.log('Curve ID received:', phase.curveId)
+      console.log('Supabase curve fetch error:', error)
+      console.log('Curve fetched from DB - name:', curve?.name)
+      console.log('Curve weeks[0]:', curve?.weeks?.[0])
+      console.log('Curve weeks[25]:', curve?.weeks?.[25])
+      console.log('Curve weeks[51]:', curve?.weeks?.[51])
 
       if (error || !curve) {
         return res.status(404).json({ error: `Curve not found for phase '${phase.name}' (id: ${phase.curveId})` })
       }
-      curveMap[phase.curveId] = curve.weeks
+      // Cast to numbers — Supabase NUMERIC[] may return strings
+      curveMap[phase.curveId] = curve.weeks.map(w => Number(w))
     }
 
     // ── STEP 3: Validate no phase date overlaps ───────────────────────────────
