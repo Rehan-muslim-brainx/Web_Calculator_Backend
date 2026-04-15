@@ -163,17 +163,17 @@ router.post('/', async (req, res) => {
     // ── STEP 2: Fetch curves from Supabase ────────────────────────────────────
     const curveMap = {}
     for (const phase of phases) {
+      console.log('=== CURVE DEBUG ===')
+      console.log('phase.curveId received:', phase.curveId)
+
       const { data: curve, error } = await supabase
         .from('curves')
-        .select('id, name, weeks')
+        .select('*')
         .eq('id', phase.curveId)
         .single()
 
-      console.log('=== PHASE CURVE DEBUG ===')
-      console.log('Phase name:', phase.name)
-      console.log('Curve ID received:', phase.curveId)
-      console.log('Supabase curve fetch error:', error)
-      console.log('Curve fetched from DB - name:', curve?.name)
+      console.log('Supabase error:', error)
+      console.log('Curve fetched name:', curve?.name)
       console.log('Curve weeks[0]:', curve?.weeks?.[0])
       console.log('Curve weeks[25]:', curve?.weeks?.[25])
       console.log('Curve weeks[51]:', curve?.weeks?.[51])
@@ -224,8 +224,8 @@ router.post('/', async (req, res) => {
     }
 
     const getLaborYearsElapsed = (anniversaryDateStr, currentDateStr) => {
-      const ann = new Date(anniversaryDateStr + 'T00:00:00')
-      const cur = new Date(currentDateStr + 'T00:00:00')
+      const ann = parseDate(anniversaryDateStr)
+      const cur = parseDate(currentDateStr)
 
       if (cur < ann) return 0
 
@@ -234,7 +234,7 @@ router.post('/', async (req, res) => {
       return Math.floor(diffDays / 365) + 1
     }
 
-    console.log('Material anniversary parsed:', parseDate(materials.anniversaryDate))
+    console.log('Labor anniversary input:', labor.anniversaryDate)
     console.log('Labor anniversary parsed:', parseDate(labor.anniversaryDate))
 
     // Pre-pass: compute each phase's subset sum so we can distribute the total
