@@ -163,26 +163,31 @@ router.post('/', async (req, res) => {
     // ── STEP 2: Fetch curves from Supabase ────────────────────────────────────
     const curveMap = {}
     for (const phase of phases) {
-      console.log('=== CURVE DEBUG ===')
-      console.log('phase.curveId received:', phase.curveId)
-
-      const { data: curve, error } = await supabase
+      const { data: rawCurve, error } = await supabase
         .from('curves')
         .select('*')
         .eq('id', phase.curveId)
         .single()
 
-      console.log('Supabase error:', error)
-      console.log('Curve fetched name:', curve?.name)
-      console.log('Curve weeks[0]:', curve?.weeks?.[0])
-      console.log('Curve weeks[25]:', curve?.weeks?.[25])
-      console.log('Curve weeks[51]:', curve?.weeks?.[51])
-
-      if (error || !curve) {
+      if (!rawCurve || error) {
         return res.status(404).json({ error: `Curve not found for phase '${phase.name}' (id: ${phase.curveId})` })
       }
-      // Cast to numbers — Supabase NUMERIC[] may return strings
-      curveMap[phase.curveId] = curve.weeks.map(w => Number(w))
+
+      console.log('RAW curve.weeks[0]:', rawCurve.weeks[0])
+      console.log('TYPE of weeks[0]:', typeof rawCurve.weeks[0])
+      console.log('TEST addition:', rawCurve.weeks[0] + rawCurve.weeks[1])
+
+      // CRITICAL FIX: Convert Supabase NUMERIC[] strings to JS numbers
+      const curve = {
+        ...rawCurve,
+        weeks: rawCurve.weeks.map(w => parseFloat(w))
+      }
+
+      console.log('CONVERTED weeks[0]:', curve.weeks[0])
+      console.log('TYPE after convert:', typeof curve.weeks[0])
+      console.log('TEST addition after fix:', curve.weeks[0] + curve.weeks[1])
+
+      curveMap[phase.curveId] = curve.weeks
     }
 
     // ── STEP 3: Validate no phase date overlaps ───────────────────────────────
@@ -201,6 +206,23 @@ router.post('/', async (req, res) => {
     }
 
     // ── STEPS 4–9: Per-phase daily calculations ───────────────────────────────
+
+    const resampleCurve = (curveWeeks, targetWeekCount) => {
+      if (targetWeekCount === 1) {
+        return [1.0]
+      }
+      const resampled = []
+      for (let i = 0; i < targetWeekCount; i++) {
+        const pos = (i / (targetWeekCount - 1)) * (curveWeeks.length - 1)
+        const lower = Math.floor(pos)
+        const upper = Math.min(lower + 1, curveWeeks.length - 1)
+        const frac = pos - lower
+        const value = curveWeeks[lower] * (1 - frac) + curveWeeks[upper] * frac
+        resampled.push(value)
+      }
+      const total = resampled.reduce((a, b) => a + b, 0)
+      return resampled.map(v => v / total)
+    }
 
     const getFullYearsElapsed = (anniversaryDate, currentDate) => {
       const ann = parseDate(anniversaryDate)
@@ -249,36 +271,33 @@ router.post('/', async (req, res) => {
         return res.status(400).json({ error: `Phase '${phase.name}' has no workdays in its date range` })
       }
       const { dayMeta, daysInWeek, phaseWeekCount } = buildPhaseWeeks(workdays)
-      const subsetSum = curveWeeks.slice(0, phaseWeekCount).reduce((a, b) => a + b, 0)
-      totalProjectWeight += subsetSum
-      console.log('Curve for phase:', phase.name)
-      console.log('Weeks subset used:', curveWeeks.slice(0, phaseWeekCount))
-      console.log('SubsetSum:', subsetSum)
-      console.log('First 3 WeeklyPct values:', [
-        curveWeeks[0] / subsetSum,
-        curveWeeks[1] / subsetSum,
-        curveWeeks[2] / subsetSum
-      ])
-      phaseData.push({ phase, curveWeeks, dayMeta, daysInWeek, phaseWeekCount, subsetSum })
+      const resampledWeeks = resampleCurve(curveWeeks, phaseWeekCount)
+      // resampledWeeks sum to 1.0, use 1.0 as the phase weight for budget distribution
+      const phaseWeight = 1.0
+      totalProjectWeight += phaseWeight
+
+      console.log(`Curve: phase ${phase.name}, phaseWeekCount: ${phaseWeekCount}`)
+      console.log('Resampled week 1:', resampledWeeks[0])
+      console.log('Resampled middle:', resampledWeeks[Math.floor(phaseWeekCount / 2)])
+      console.log('Resampled last:', resampledWeeks[phaseWeekCount - 1])
+
+      phaseData.push({ phase, resampledWeeks, dayMeta, daysInWeek, phaseWeekCount, phaseWeight })
     }
 
     // Accumulate into a map keyed by ISO Monday date string
     const weekAccumulator = {} // { [mondayISO]: { materialCost, laborCost, hours } }
 
-    for (const { phase, curveWeeks, dayMeta, daysInWeek, phaseWeekCount, subsetSum } of phaseData) {
+    for (const { phase, resampledWeeks, dayMeta, daysInWeek, phaseWeekCount, phaseWeight } of phaseData) {
 
       // Each phase gets its proportional share of the total budget
-      const phaseMaterialBudget = materials.budget * (subsetSum / totalProjectWeight)
-      const phaseLaborBudget    = labor.budget    * (subsetSum / totalProjectWeight)
-
-      // Step 6 — renormalize curve
-      const weeklyPct = buildWeeklyPct(curveWeeks, phaseWeekCount)
+      const phaseMaterialBudget = materials.budget * (phaseWeight / totalProjectWeight)
+      const phaseLaborBudget    = labor.budget    * (phaseWeight / totalProjectWeight)
 
       // Steps 7–9 — per workday
       for (let dayIndex = 0; dayIndex < dayMeta.length; dayIndex++) {
         const { date, phaseWeekIndex } = dayMeta[dayIndex]
         const daysInThisWeek = daysInWeek[phaseWeekIndex]
-        const productionPct = weeklyPct[phaseWeekIndex] / daysInThisWeek
+        const productionPct = resampledWeeks[phaseWeekIndex - 1] / daysInThisWeek
 
         // Step 7
         const rawDailyHours = phase.estimatedHours * productionPct
