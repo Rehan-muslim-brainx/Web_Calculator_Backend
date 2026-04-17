@@ -7,19 +7,13 @@ const router = Router()
 
 function parseDate(dateStr) {
   if (!dateStr) return null
-
-  // If format is YYYY-MM-DD (from HTML date input) use directly
   if (/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
     return new Date(dateStr + 'T00:00:00')
   }
-
-  // If format is DD/MM/YYYY convert to YYYY-MM-DD first
   if (/^\d{2}\/\d{2}\/\d{4}$/.test(dateStr)) {
     const [day, month, year] = dateStr.split('/')
     return new Date(`${year}-${month}-${day}T00:00:00`)
   }
-
-  // If format is MM/DD/YYYY (fallback)
   return new Date(dateStr + 'T00:00:00')
 }
 
@@ -30,8 +24,8 @@ function isValidDate(str) {
 
 function toMonday(date) {
   const d = new Date(date)
-  const day = d.getDay() // 0=Sun, 1=Mon ... 6=Sat
-  const diff = day === 0 ? -6 : 1 - day // roll back to Monday
+  const day = d.getDay()
+  const diff = day === 0 ? -6 : 1 - day
   d.setDate(d.getDate() + diff)
   d.setHours(0, 0, 0, 0)
   return d
@@ -41,7 +35,6 @@ function isoMonday(date) {
   return toMonday(date).toISOString().slice(0, 10)
 }
 
-// STEP 4 — build workday list for a phase
 function getWorkdays(startDate, endDate) {
   const workdays = []
   const current = parseDate(startDate)
@@ -56,14 +49,10 @@ function getWorkdays(startDate, endDate) {
   return workdays
 }
 
-// STEP 5 — group workdays into phase weeks, return per-day metadata
 function buildPhaseWeeks(workdays) {
-  // Each workday gets a phaseWeekIndex (1-based).
-  // A new phase week starts on Monday (or on the very first workday).
   const dayMeta = []
   let phaseWeekIndex = 1
   let prevMonday = null
-
   for (const day of workdays) {
     const monday = isoMonday(day)
     if (prevMonday === null) {
@@ -74,69 +63,63 @@ function buildPhaseWeeks(workdays) {
     }
     dayMeta.push({ date: new Date(day), phaseWeekIndex })
   }
-
-  // Count workdays per phase week (DaysInWeek for each week index)
   const daysInWeek = {}
   for (const d of dayMeta) {
     daysInWeek[d.phaseWeekIndex] = (daysInWeek[d.phaseWeekIndex] || 0) + 1
   }
-
-  const phaseWeekCount = phaseWeekIndex
-
-  return { dayMeta, daysInWeek, phaseWeekCount }
+  return { dayMeta, daysInWeek, phaseWeekCount: phaseWeekIndex }
 }
 
-// STEP 6 — renormalize curve to phase length
-function buildWeeklyPct(curveWeeks, phaseWeekCount) {
-  const subset = curveWeeks.slice(0, phaseWeekCount)
-  const subsetSum = subset.reduce((a, b) => a + b, 0)
-  // weeklyPct is 1-indexed: weeklyPct[weekIndex] = renormalized weight
-  const weeklyPct = {}
-  for (let i = 0; i < phaseWeekCount; i++) {
-    weeklyPct[i + 1] = subset[i] / subsetSum
-  }
-  return weeklyPct
-}
-
-
-// Format a date as "Mon D" e.g. "Jul 1"
 function formatWeekLabel(dateStr) {
   const d = new Date(dateStr + 'T00:00:00')
   return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
 }
 
+const resampleCurve = (curveWeeks, targetWeekCount) => {
+  if (targetWeekCount === 1) return [1.0]
+  const resampled = []
+  for (let i = 0; i < targetWeekCount; i++) {
+    const pos = (i / (targetWeekCount - 1)) * (curveWeeks.length - 1)
+    const lower = Math.floor(pos)
+    const upper = Math.min(lower + 1, curveWeeks.length - 1)
+    const frac = pos - lower
+    resampled.push(curveWeeks[lower] * (1 - frac) + curveWeeks[upper] * frac)
+  }
+  const total = resampled.reduce((a, b) => a + b, 0)
+  return resampled.map(v => v / total)
+}
+
+const getFullYearsElapsed = (anniversaryDate, currentDate) => {
+  const ann = parseDate(anniversaryDate)
+  const cur = parseDate(currentDate)
+  if (!ann || !cur || cur < ann) return 0
+  let years = cur.getFullYear() - ann.getFullYear()
+  const anniversaryThisYear = new Date(cur.getFullYear(), ann.getMonth(), ann.getDate())
+  if (cur < anniversaryThisYear) years -= 1
+  return Math.max(0, years)
+}
+
+const getLaborYearsElapsed = (anniversaryDateStr, currentDateStr) => {
+  const ann = parseDate(anniversaryDateStr)
+  const cur = parseDate(currentDateStr)
+  if (cur < ann) return 0
+  const diffMs = cur.getTime() - ann.getTime()
+  const diffDays = diffMs / (1000 * 60 * 60 * 24)
+  return Math.floor(diffDays / 365) + 1
+}
+
 // POST /api/calculate
 router.post('/', async (req, res) => {
   try {
-    const { projectInfo, schedule, phases, materials, labor } = req.body
+    const { projectInfo, schedule, phases } = req.body
 
-    // ── STEP 1: Input validation ──────────────────────────────────────────────
+    // ── STEP 1: Validate phases array ─────────────────────────────────────────
     if (!Array.isArray(phases) || phases.length < 1 || phases.length > 3) {
       return res.status(400).json({ error: 'phases must be an array of 1 to 3 items' })
     }
 
     if (!isValidDate(schedule?.startDate) || !isValidDate(schedule?.endDate)) {
       return res.status(400).json({ error: 'schedule.startDate and schedule.endDate must be valid dates' })
-    }
-
-    if (!isValidDate(materials?.anniversaryDate)) {
-      return res.status(400).json({ error: 'materials.anniversaryDate must be a valid date' })
-    }
-    if (!isValidDate(labor?.anniversaryDate)) {
-      return res.status(400).json({ error: 'labor.anniversaryDate must be a valid date' })
-    }
-
-    if (typeof materials?.budget !== 'number' || materials.budget <= 0) {
-      return res.status(400).json({ error: 'materials.budget must be a positive number' })
-    }
-    if (typeof labor?.budget !== 'number' || labor.budget <= 0) {
-      return res.status(400).json({ error: 'labor.budget must be a positive number' })
-    }
-    if (typeof materials?.escalationPercent !== 'number' || materials.escalationPercent < 0) {
-      return res.status(400).json({ error: 'materials.escalationPercent must be 0 or a positive number' })
-    }
-    if (typeof labor?.escalationPercent !== 'number' || labor.escalationPercent < 0) {
-      return res.status(400).json({ error: 'labor.escalationPercent must be 0 or a positive number' })
     }
 
     for (let i = 0; i < phases.length; i++) {
@@ -158,11 +141,62 @@ router.post('/', async (req, res) => {
       if (!p.curveId) {
         return res.status(400).json({ error: `${label}.curveId is required` })
       }
+
+      // Validate per-phase materials
+      if (!Array.isArray(p.materials) || p.materials.length === 0) {
+        return res.status(400).json({ error: `Phase "${p.name}" must have at least 1 material` })
+      }
+      if (p.materials.length > 5) {
+        return res.status(400).json({ error: `Phase "${p.name}" may have at most 5 materials` })
+      }
+      for (const mat of p.materials) {
+        if (!mat.name || !mat.name.trim()) {
+          return res.status(400).json({ error: `A material in phase "${p.name}" is missing a name` })
+        }
+        if (!mat.budget || isNaN(parseFloat(mat.budget))) {
+          return res.status(400).json({ error: `Material "${mat.name}" in phase "${p.name}" has invalid budget` })
+        }
+        if (mat.escalationPercent === undefined || mat.escalationPercent === null || isNaN(parseFloat(mat.escalationPercent))) {
+          return res.status(400).json({ error: `Material "${mat.name}" in phase "${p.name}" has invalid escalation percent` })
+        }
+        if (!mat.anniversaryDate) {
+          return res.status(400).json({ error: `Material "${mat.name}" in phase "${p.name}" is missing anniversary date` })
+        }
+        if (!isValidDate(mat.anniversaryDate)) {
+          return res.status(400).json({ error: `Material "${mat.name}" in phase "${p.name}" has invalid anniversary date` })
+        }
+      }
+
+      // Validate per-phase labors
+      if (!Array.isArray(p.labors) || p.labors.length === 0) {
+        return res.status(400).json({ error: `Phase "${p.name}" must have at least 1 labor type` })
+      }
+      if (p.labors.length > 5) {
+        return res.status(400).json({ error: `Phase "${p.name}" may have at most 5 labor types` })
+      }
+      for (const lab of p.labors) {
+        if (!lab.name || !lab.name.trim()) {
+          return res.status(400).json({ error: `A labor type in phase "${p.name}" is missing a name` })
+        }
+        if (!lab.budget || isNaN(parseFloat(lab.budget))) {
+          return res.status(400).json({ error: `Labor "${lab.name}" in phase "${p.name}" has invalid budget` })
+        }
+        if (lab.escalationPercent === undefined || lab.escalationPercent === null || isNaN(parseFloat(lab.escalationPercent))) {
+          return res.status(400).json({ error: `Labor "${lab.name}" in phase "${p.name}" has invalid escalation percent` })
+        }
+        if (!lab.anniversaryDate) {
+          return res.status(400).json({ error: `Labor "${lab.name}" in phase "${p.name}" is missing anniversary date` })
+        }
+        if (!isValidDate(lab.anniversaryDate)) {
+          return res.status(400).json({ error: `Labor "${lab.name}" in phase "${p.name}" has invalid anniversary date` })
+        }
+      }
     }
 
     // ── STEP 2: Fetch curves from Supabase ────────────────────────────────────
     const curveMap = {}
     for (const phase of phases) {
+      if (curveMap[phase.curveId]) continue
       const { data: rawCurve, error } = await supabase
         .from('curves')
         .select('*')
@@ -173,97 +207,23 @@ router.post('/', async (req, res) => {
         return res.status(404).json({ error: `Curve not found for phase '${phase.name}' (id: ${phase.curveId})` })
       }
 
-      console.log('RAW curve.weeks[0]:', rawCurve.weeks[0])
-      console.log('TYPE of weeks[0]:', typeof rawCurve.weeks[0])
-      console.log('TEST addition:', rawCurve.weeks[0] + rawCurve.weeks[1])
-
-      // CRITICAL FIX: Convert Supabase NUMERIC[] strings to JS numbers
-      const curve = {
-        ...rawCurve,
-        weeks: rawCurve.weeks.map(w => parseFloat(w))
-      }
-
-      console.log('CONVERTED weeks[0]:', curve.weeks[0])
-      console.log('TYPE after convert:', typeof curve.weeks[0])
-      console.log('TEST addition after fix:', curve.weeks[0] + curve.weeks[1])
-
-      curveMap[phase.curveId] = curve.weeks
+      curveMap[phase.curveId] = rawCurve.weeks.map(w => parseFloat(w))
     }
 
     // ── STEP 3: Validate no phase date overlaps ───────────────────────────────
     for (let i = 0; i < phases.length; i++) {
       for (let j = i + 1; j < phases.length; j++) {
-        const a = phases[i]
-        const b = phases[j]
+        const a = phases[i], b = phases[j]
         const overlap = parseDate(a.startDate) < parseDate(b.endDate) &&
                         parseDate(b.startDate) < parseDate(a.endDate)
         if (overlap) {
-          return res.status(400).json({
-            error: `Phase '${a.name}' and '${b.name}' have overlapping dates`
-          })
+          return res.status(400).json({ error: `Phase '${a.name}' and '${b.name}' have overlapping dates` })
         }
       }
     }
 
-    // ── STEPS 4–9: Per-phase daily calculations ───────────────────────────────
-
-    const resampleCurve = (curveWeeks, targetWeekCount) => {
-      if (targetWeekCount === 1) {
-        return [1.0]
-      }
-      const resampled = []
-      for (let i = 0; i < targetWeekCount; i++) {
-        const pos = (i / (targetWeekCount - 1)) * (curveWeeks.length - 1)
-        const lower = Math.floor(pos)
-        const upper = Math.min(lower + 1, curveWeeks.length - 1)
-        const frac = pos - lower
-        const value = curveWeeks[lower] * (1 - frac) + curveWeeks[upper] * frac
-        resampled.push(value)
-      }
-      const total = resampled.reduce((a, b) => a + b, 0)
-      return resampled.map(v => v / total)
-    }
-
-    const getFullYearsElapsed = (anniversaryDate, currentDate) => {
-      const ann = parseDate(anniversaryDate)
-      const cur = parseDate(currentDate)
-
-      if (!ann || !cur || cur < ann) return 0
-
-      let years = cur.getFullYear() - ann.getFullYear()
-
-      const anniversaryThisYear = new Date(
-        cur.getFullYear(),
-        ann.getMonth(),
-        ann.getDate()
-      )
-
-      if (cur < anniversaryThisYear) {
-        years -= 1
-      }
-
-      return Math.max(0, years)
-    }
-
-    const getLaborYearsElapsed = (anniversaryDateStr, currentDateStr) => {
-      const ann = parseDate(anniversaryDateStr)
-      const cur = parseDate(currentDateStr)
-
-      if (cur < ann) return 0
-
-      const diffMs = cur.getTime() - ann.getTime()
-      const diffDays = diffMs / (1000 * 60 * 60 * 24)
-      return Math.floor(diffDays / 365) + 1
-    }
-
-    console.log('Labor anniversary input:', labor.anniversaryDate)
-    console.log('Labor anniversary parsed:', parseDate(labor.anniversaryDate))
-
-    // Pre-pass: compute each phase's subset sum so we can distribute the total
-    // budget proportionally across phases (fixes double-counting bug).
-    const phaseData = []
-    let totalProjectWeight = 0
-
+    // ── STEPS 4–9: Build per-phase workday metadata ───────────────────────────
+    const phaseWeights = []
     for (const phase of phases) {
       const curveWeeks = curveMap[phase.curveId]
       const workdays = getWorkdays(phase.startDate, phase.endDate)
@@ -272,125 +232,152 @@ router.post('/', async (req, res) => {
       }
       const { dayMeta, daysInWeek, phaseWeekCount } = buildPhaseWeeks(workdays)
       const resampledWeeks = resampleCurve(curveWeeks, phaseWeekCount)
-      // resampledWeeks sum to 1.0, use 1.0 as the phase weight for budget distribution
-      const phaseWeight = 1.0
-      totalProjectWeight += phaseWeight
-
-      console.log(`Curve: phase ${phase.name}, phaseWeekCount: ${phaseWeekCount}`)
-      console.log('Resampled week 1:', resampledWeeks[0])
-      console.log('Resampled middle:', resampledWeeks[Math.floor(phaseWeekCount / 2)])
-      console.log('Resampled last:', resampledWeeks[phaseWeekCount - 1])
-
-      phaseData.push({ phase, resampledWeeks, dayMeta, daysInWeek, phaseWeekCount, phaseWeight })
+      phaseWeights.push({ phase, resampledWeeks, dayMeta, daysInWeek })
     }
 
-    // Accumulate into a map keyed by ISO Monday date string
+    // ── STEP 10: Calculate per-day costs and accumulate ───────────────────────
     const weekAccumulator = {} // { [mondayISO]: { materialCost, laborCost, hours } }
+    const phaseBreakdown = []
 
-    for (const { phase, resampledWeeks, dayMeta, daysInWeek, phaseWeekCount, phaseWeight } of phaseData) {
+    for (const { phase, resampledWeeks, dayMeta, daysInWeek } of phaseWeights) {
 
-      // Each phase gets its proportional share of the total budget
-      const phaseMaterialBudget = materials.budget * (phaseWeight / totalProjectWeight)
-      const phaseLaborBudget    = labor.budget    * (phaseWeight / totalProjectWeight)
+      // Per-phase trackers keyed by index (handles duplicate names correctly)
+      const matEscalatedTotals = new Array(phase.materials.length).fill(0)
+      const labEscalatedTotals = new Array(phase.labors.length).fill(0)
 
-      // Steps 7–9 — per workday
       for (let dayIndex = 0; dayIndex < dayMeta.length; dayIndex++) {
         const { date, phaseWeekIndex } = dayMeta[dayIndex]
         const daysInThisWeek = daysInWeek[phaseWeekIndex]
         const productionPct = resampledWeeks[phaseWeekIndex - 1] / daysInThisWeek
 
-        // Step 7
+        // Hours
         const rawDailyHours = phase.estimatedHours * productionPct
         const dailyHours = Math.max(8, rawDailyHours)
 
-        // Step 8 — Material escalation factor
         const currentDayStr = date.toISOString().split('T')[0]
-        const materialYears = getFullYearsElapsed(materials.anniversaryDate, currentDayStr)
-        const matEscFactor = Math.pow(1 + materials.escalationPercent / 100, materialYears)
-
-        // Labor escalation factor
-        const laborYears = getLaborYearsElapsed(labor.anniversaryDate, currentDayStr)
-        const labEscFactor = Math.pow(1 + labor.escalationPercent / 100, laborYears)
-
-        // Log first day of each phase to verify escalation years
-        if (dayIndex === 0) {
-          console.log('Phase:', phase.name)
-          console.log('Labor ann:', labor.anniversaryDate)
-          console.log('Labor years:', laborYears)
-          console.log('Labor escFactor:', labEscFactor)
-          console.log('Material years:', materialYears)
-          console.log('Material escFactor:', matEscFactor)
-        }
-
-        // Step 9 — use phase-proportional budget, not total budget
-        const dailyMaterialCost = phaseMaterialBudget * matEscFactor * productionPct
-        const dailyLaborCost    = phaseLaborBudget    * labEscFactor * productionPct
-
-        // Step 10 — accumulate into calendar week bucket
         const mondayKey = isoMonday(date)
         if (!weekAccumulator[mondayKey]) {
           weekAccumulator[mondayKey] = { materialCost: 0, laborCost: 0, hours: 0 }
         }
-        weekAccumulator[mondayKey].materialCost += dailyMaterialCost
-        weekAccumulator[mondayKey].laborCost    += dailyLaborCost
-        weekAccumulator[mondayKey].hours        += dailyHours
+        weekAccumulator[mondayKey].hours += dailyHours
+
+        // Per-material escalation
+        let totalDailyMaterialCost = 0
+        for (let mIdx = 0; mIdx < phase.materials.length; mIdx++) {
+          const material = phase.materials[mIdx]
+          const materialYears = getFullYearsElapsed(material.anniversaryDate, currentDayStr)
+          const materialEscFactor = Math.pow(1 + parseFloat(material.escalationPercent) / 100, materialYears)
+          const dailyMatCost = parseFloat(material.budget) * materialEscFactor * productionPct
+          totalDailyMaterialCost += dailyMatCost
+          matEscalatedTotals[mIdx] += dailyMatCost
+        }
+
+        // Per-labor escalation
+        let totalDailyLaborCost = 0
+        for (let lIdx = 0; lIdx < phase.labors.length; lIdx++) {
+          const labor = phase.labors[lIdx]
+          const laborYears = getLaborYearsElapsed(labor.anniversaryDate, currentDayStr)
+          const laborEscFactor = Math.pow(1 + parseFloat(labor.escalationPercent) / 100, laborYears)
+          const dailyLabCost = parseFloat(labor.budget) * laborEscFactor * productionPct
+          totalDailyLaborCost += dailyLabCost
+          labEscalatedTotals[lIdx] += dailyLabCost
+        }
+
+        weekAccumulator[mondayKey].materialCost += totalDailyMaterialCost
+        weekAccumulator[mondayKey].laborCost    += totalDailyLaborCost
       }
+
+      // Build phase breakdown after day loop
+      const materialsBreakdown = phase.materials.map((m, mIdx) => {
+        const budgeted  = parseFloat(m.budget)
+        const escalated = matEscalatedTotals[mIdx]
+        const difference = escalated - budgeted
+        return { name: m.name, budgeted, escalated, difference, escPercent: budgeted > 0 ? difference / budgeted : 0 }
+      })
+
+      const laborsBreakdown = phase.labors.map((l, lIdx) => {
+        const budgeted  = parseFloat(l.budget)
+        const escalated = labEscalatedTotals[lIdx]
+        const difference = escalated - budgeted
+        return { name: l.name, budgeted, escalated, difference, escPercent: budgeted > 0 ? difference / budgeted : 0 }
+      })
+
+      const phaseBudgetedMat  = phase.materials.reduce((s, m) => s + parseFloat(m.budget), 0)
+      const phaseEscalatedMat = materialsBreakdown.reduce((s, m) => s + m.escalated, 0)
+      const phaseBudgetedLab  = phase.labors.reduce((s, l) => s + parseFloat(l.budget), 0)
+      const phaseEscalatedLab = laborsBreakdown.reduce((s, l) => s + l.escalated, 0)
+
+      phaseBreakdown.push({
+        phaseName: phase.name,
+        materials: materialsBreakdown,
+        labors: laborsBreakdown,
+        phaseMaterialTotal: {
+          budgeted:   phaseBudgetedMat,
+          escalated:  phaseEscalatedMat,
+          difference: phaseEscalatedMat - phaseBudgetedMat,
+          escPercent: phaseBudgetedMat > 0 ? (phaseEscalatedMat - phaseBudgetedMat) / phaseBudgetedMat : 0,
+        },
+        phaseLaborTotal: {
+          budgeted:   phaseBudgetedLab,
+          escalated:  phaseEscalatedLab,
+          difference: phaseEscalatedLab - phaseBudgetedLab,
+          escPercent: phaseBudgetedLab > 0 ? (phaseEscalatedLab - phaseBudgetedLab) / phaseBudgetedLab : 0,
+        },
+        phaseTotal: {
+          budgeted:   phaseBudgetedMat + phaseBudgetedLab,
+          escalated:  phaseEscalatedMat + phaseEscalatedLab,
+          difference: (phaseEscalatedMat + phaseEscalatedLab) - (phaseBudgetedMat + phaseBudgetedLab),
+          escPercent: (phaseBudgetedMat + phaseBudgetedLab) > 0
+            ? ((phaseEscalatedMat + phaseEscalatedLab) - (phaseBudgetedMat + phaseBudgetedLab)) / (phaseBudgetedMat + phaseBudgetedLab)
+            : 0,
+        },
+      })
     }
 
-    // ── STEP 10: Sort weeks chronologically and compute cumulative totals ──────
+    // ── STEP 11: Sort weeks and compute cumulative totals ─────────────────────
     const sortedMondays = Object.keys(weekAccumulator).sort()
-
     let cumulativeMaterial = 0
-    let cumulativeLabor = 0
+    let cumulativeLabor    = 0
 
     const weeklyData = sortedMondays.map((mondayKey, idx) => {
       const bucket = weekAccumulator[mondayKey]
       cumulativeMaterial += bucket.materialCost
-      cumulativeLabor += bucket.laborCost
-
+      cumulativeLabor    += bucket.laborCost
       return {
         week: idx + 1,
         weekLabel: formatWeekLabel(mondayKey),
         materialCost: bucket.materialCost,
-        laborCost: bucket.laborCost,
-        hours: bucket.hours,
+        laborCost:    bucket.laborCost,
+        hours:        bucket.hours,
         cumulativeMaterial,
-        cumulativeLabor
+        cumulativeLabor,
       }
     })
 
-    console.log('weeklyData sample:', weeklyData.slice(0, 5))
-
-    // ── STEP 11: Summary ──────────────────────────────────────────────────────
-    const escalatedMaterial = weeklyData.reduce((sum, w) => sum + w.materialCost, 0)
-    const escalatedLabor = weeklyData.reduce((sum, w) => sum + w.laborCost, 0)
-
-    const budgetedMaterial = materials.budget
-    const budgetedLabor = labor.budget
-
-    const materialDifference = escalatedMaterial - budgetedMaterial
-    const laborDifference = escalatedLabor - budgetedLabor
-
-    const totalBudget = budgetedMaterial + budgetedLabor
-    const totalEscalated = escalatedMaterial + escalatedLabor
-    const totalDifference = totalEscalated - totalBudget
+    // ── STEP 12: Summary (keys preserved for PDF export compatibility) ─────────
+    const totalBudgetedMaterial  = phases.flatMap(p => p.materials).reduce((s, m) => s + parseFloat(m.budget), 0)
+    const totalEscalatedMaterial = phaseBreakdown.flatMap(pb => pb.materials).reduce((s, m) => s + m.escalated, 0)
+    const totalBudgetedLabor     = phases.flatMap(p => p.labors).reduce((s, l) => s + parseFloat(l.budget), 0)
+    const totalEscalatedLabor    = phaseBreakdown.flatMap(pb => pb.labors).reduce((s, l) => s + l.escalated, 0)
 
     const summary = {
-      budgetedMaterial,
-      escalatedMaterial,
-      materialDifference,
-      materialEscPercent: materialDifference / budgetedMaterial,
-      budgetedLabor,
-      escalatedLabor,
-      laborDifference,
-      laborEscPercent: laborDifference / budgetedLabor,
-      totalBudget,
-      totalEscalated,
-      totalDifference,
-      totalEscPercent: totalDifference / totalBudget
+      budgetedMaterial:   totalBudgetedMaterial,
+      escalatedMaterial:  totalEscalatedMaterial,
+      materialDifference: totalEscalatedMaterial - totalBudgetedMaterial,
+      materialEscPercent: totalBudgetedMaterial > 0 ? (totalEscalatedMaterial - totalBudgetedMaterial) / totalBudgetedMaterial : 0,
+      budgetedLabor:      totalBudgetedLabor,
+      escalatedLabor:     totalEscalatedLabor,
+      laborDifference:    totalEscalatedLabor - totalBudgetedLabor,
+      laborEscPercent:    totalBudgetedLabor > 0 ? (totalEscalatedLabor - totalBudgetedLabor) / totalBudgetedLabor : 0,
+      totalBudget:        totalBudgetedMaterial + totalBudgetedLabor,
+      totalEscalated:     totalEscalatedMaterial + totalEscalatedLabor,
+      totalDifference:    (totalEscalatedMaterial + totalEscalatedLabor) - (totalBudgetedMaterial + totalBudgetedLabor),
+      totalEscPercent:    (totalBudgetedMaterial + totalBudgetedLabor) > 0
+        ? ((totalEscalatedMaterial + totalEscalatedLabor) - (totalBudgetedMaterial + totalBudgetedLabor)) / (totalBudgetedMaterial + totalBudgetedLabor)
+        : 0,
     }
 
-    // ── STEP 12: Response ─────────────────────────────────────────────────────
+    // ── STEP 13: Response ─────────────────────────────────────────────────────
     res.json({
       projectInfo: {
         ...projectInfo,
@@ -398,11 +385,12 @@ router.post('/', async (req, res) => {
           name: p.name,
           startDate: p.startDate,
           endDate: p.endDate,
-          estimatedHours: p.estimatedHours
+          estimatedHours: p.estimatedHours,
         }))
       },
       weeklyData,
-      summary
+      phaseBreakdown,
+      summary,
     })
   } catch (err) {
     res.status(500).json({ error: err.message })
