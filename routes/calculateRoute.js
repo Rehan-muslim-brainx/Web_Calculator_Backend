@@ -210,18 +210,6 @@ router.post('/', async (req, res) => {
       curveMap[phase.curveId] = rawCurve.weeks.map(w => parseFloat(w))
     }
 
-    // ── STEP 3: Validate no phase date overlaps ───────────────────────────────
-    for (let i = 0; i < phases.length; i++) {
-      for (let j = i + 1; j < phases.length; j++) {
-        const a = phases[i], b = phases[j]
-        const overlap = parseDate(a.startDate) < parseDate(b.endDate) &&
-                        parseDate(b.startDate) < parseDate(a.endDate)
-        if (overlap) {
-          return res.status(400).json({ error: `Phase '${a.name}' and '${b.name}' have overlapping dates` })
-        }
-      }
-    }
-
     // ── STEPS 4–9: Build per-phase workday metadata ───────────────────────────
     const phaseWeights = []
     for (const phase of phases) {
@@ -265,7 +253,7 @@ router.post('/', async (req, res) => {
         let totalDailyMaterialCost = 0
         for (let mIdx = 0; mIdx < phase.materials.length; mIdx++) {
           const material = phase.materials[mIdx]
-          const materialYears = getFullYearsElapsed(material.anniversaryDate, currentDayStr)
+          const materialYears = getLaborYearsElapsed(material.anniversaryDate, currentDayStr)
           const materialEscFactor = Math.pow(1 + parseFloat(material.escalationPercent) / 100, materialYears)
           const dailyMatCost = parseFloat(material.budget) * materialEscFactor * productionPct
           totalDailyMaterialCost += dailyMatCost
