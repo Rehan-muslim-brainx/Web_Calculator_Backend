@@ -240,7 +240,7 @@ router.post('/', async (req, res) => {
 
         // Hours
         const rawDailyHours = phase.estimatedHours * productionPct
-        const dailyHours = Math.max(8, rawDailyHours)
+        const dailyHours = rawDailyHours
 
         const currentDayStr = date.toISOString().split('T')[0]
         const mondayKey = isoMonday(date)
